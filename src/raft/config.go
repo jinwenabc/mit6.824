@@ -171,7 +171,6 @@ func (cfg *config) start1(i int) {
 			if m.CommandValid == false {
 				// ignore other types of ApplyMsg
 			} else if v, ok := (m.Command).(int); ok {
-				fmt.Printf("server %d apply command:%d\n",i, v)
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
@@ -185,7 +184,6 @@ func (cfg *config) start1(i int) {
 				if m.CommandIndex > cfg.maxIndex {
 					cfg.maxIndex = m.CommandIndex
 				}
-				fmt.Println(cfg.logs)
 				cfg.mu.Unlock()
 
 				if m.CommandIndex > 1 && prevok == false {
@@ -455,7 +453,6 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				fmt.Printf("after nCommitted, nd:%d, cmd1:%d\n", nd, cmd1.(int))
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {

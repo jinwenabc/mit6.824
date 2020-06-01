@@ -92,7 +92,6 @@ type Raft struct {
 	matchIndex        []int
 
 	lastReceivedTime time.Time
-	voteChan         chan int
 	applyCh          chan ApplyMsg
 }
 
@@ -251,9 +250,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteReplyCh chan *RequestVoteReply) bool {
+	reply := &RequestVoteReply{}
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	rf.voteChan <- server
+	voteReplyCh <- reply
 	return ok
 }
 
@@ -415,7 +415,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.lastReceivedTime = time.Now()
 	rf.raftState.votedFor = -1
-	rf.voteChan = make(chan int)
 	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -468,13 +467,9 @@ loop:
 		rf.mu.Unlock()
 requestVote:
 		rf.mu.Lock()
-		//if rf.raftState.votedFor!=-1{
-		//	rf.mu.Unlock()
-		//	fmt.Printf("now server %d release lock 1\n", rf.me)
-		//	goto loop
-		//}
 		rf.flag = CANDIDATE
 		rf.raftState.currentTerm ++
+		// increase currentTerm, reset votedFor to -1 means hasn't vote for anyone in current term
 		rf.raftState.votedFor = -1
 		rf.mu.Unlock()
 
@@ -492,31 +487,32 @@ requestVote:
 			voteArgs.LastLogIndex = -1
 			voteArgs.LastLogTerm = 0
 		}
-		reply := make([]*RequestVoteReply, 0)
-		for i:=0; i<len(rf.peers); i++{
-			reply = append(reply, &RequestVoteReply{})
-		}
+		//reply := make([]*RequestVoteReply, 0)
+		//for i:=0; i<len(rf.peers); i++{
+		//	reply = append(reply, &RequestVoteReply{})
+		//}
 		rf.mu.Lock()
 		if rf.raftState.votedFor != -1{
 			rf.mu.Unlock()
 			goto loop
 		}
 		rf.mu.Unlock()
+		voteReplyCh := make(chan *RequestVoteReply)
 		for id := range rf.peers{
 			if id == me{
 				continue
 			}
-			go rf.sendRequestVote(id, voteArgs, reply[id])
+			go rf.sendRequestVote(id, voteArgs, voteReplyCh)
 		}
 		approved := 1
 		replyCount := 1
 		fmt.Printf("now server %d wait vote result\n",rf.me)
 		for{
 			select {
-			case id := <-rf.voteChan:
-				fmt.Printf("Server %d votes server %d, result:%v\n", id, rf.me, reply[id].VoteGranted)
+			case reply := <-voteReplyCh:
+				fmt.Printf("Server %d got vote result:%v\n", rf.me, reply)
 				replyCount ++
-				if reply[id].VoteGranted{
+				if reply.VoteGranted{
 					approved ++
 				}
 				if approved > len(rf.peers) - approved{
@@ -592,7 +588,11 @@ func (rf *Raft)syncWithFollower(server int, syncType int)  {
 		if reply.Success{
 			break
 		}
-		rf.nextIndex[server]--
+		rf.mu.Lock()
+		if rf.nextIndex[server] > 1{
+			rf.nextIndex[server]--
+		}
+		rf.mu.Unlock()
 	}
 	rf.mu.Lock()
 	rf.nextIndex[server] = len(rf.raftState.logEntries)+1
@@ -616,16 +616,19 @@ func (rf *Raft) updateLeaderCommitIndex()  {
 			max = match
 		}
 	}
+	if max == committed{
+		return
+	}
 	for min + 1 < max{
 		mid := (min + max)>>1
-		if isMajorityMatch(rf.matchIndex, mid) && rf.raftState.logEntries[mid].Term == rf.raftState.currentTerm{
+		if isMajorityMatch(rf.matchIndex, mid) && rf.raftState.logEntries[mid-1].Term == rf.raftState.currentTerm{
 			min = mid
 		}else{
 			max = mid
 		}
 	}
 	//fmt.Println("in update commitIndex", max, rf.raftState.logEntries)
-	if isMajorityMatch(rf.matchIndex, max) && rf.raftState.logEntries[max].Term == rf.raftState.currentTerm{
+	if isMajorityMatch(rf.matchIndex, max) && rf.raftState.logEntries[max-1].Term == rf.raftState.currentTerm{
 		rf.commitIndex = max
 	}else{
 		rf.commitIndex = min
