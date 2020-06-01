@@ -171,6 +171,7 @@ func (cfg *config) start1(i int) {
 			if m.CommandValid == false {
 				// ignore other types of ApplyMsg
 			} else if v, ok := (m.Command).(int); ok {
+				fmt.Printf("server %d apply comand:%d\n", i, v)
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
