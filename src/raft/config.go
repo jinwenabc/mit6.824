@@ -4,7 +4,7 @@ package raft
 // support for Raft tester.
 //
 // we will use the original config.go to test your code for grading.
-// so, while you can modify this code to help you debug, please
+// so, while you can modify this code to help you DebugMode, please
 // test with the original before submitting.
 //
 
@@ -171,7 +171,7 @@ func (cfg *config) start1(i int) {
 			if m.CommandValid == false {
 				// ignore other types of ApplyMsg
 			} else if v, ok := (m.Command).(int); ok {
-				fmt.Printf("server %d apply comand:%d\n", i, v)
+				Logf("server %d apply comand:%d\n", i, v)
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
