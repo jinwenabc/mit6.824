@@ -3,6 +3,7 @@ This is the lab of MIT 6.824 2018.
 
 1. Lab 1 MapReduce hasn't test
 2. Lab 2 Raft:  
+   set DebugMode to true while debuging to print debug logs.
    Outline of the API that raft expose to
    the service (or tester):  
    1. rf = Make(...)  
