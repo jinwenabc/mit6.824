@@ -13,4 +13,5 @@ This is the lab of MIT 6.824 2018.
    ask a Raft for its current Term, and whether it thinks it is leader
    
   + 2A: Passed TestElection, TestReElection
-  + 2B: Passed TestBasicAgree2B, TestFailAgree2B, TestFailNoAgree2B
+  + 2B: Passed TestBasicAgree2B, TestFailAgree2B, TestFailNoAgree2B, TestConcurrentStarts2B, TestRejoin2B, TestBackup2B, TestCount2B
+  + 2C: 
