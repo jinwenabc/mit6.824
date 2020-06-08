@@ -15,4 +15,4 @@ This is the lab of MIT 6.824 2018.
    
   + 2A: Passed TestElection, TestReElection
   + 2B: Passed TestBasicAgree2B, TestFailAgree2B, TestFailNoAgree2B, TestConcurrentStarts2B, TestRejoin2B, TestBackup2B, TestCount2B
-  + 2C: Passed TestPersist12C, TestPersist22C, TestPersist32C, TestFigure82C, TestUnreliableAgree2C, TestFigure8Unreliable2C
+  + 2C: Passed TestPersist12C, TestPersist22C, TestPersist32C, TestFigure82C, TestUnreliableAgree2C, TestFigure8Unreliable2C, TestReliableChurn2C, TestUnreliableChurn2C

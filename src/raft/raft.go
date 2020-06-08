@@ -479,8 +479,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastReceivedTime = time.Now()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.commitIndex = len(rf.persistentState.LogEntries)
-	rf.lastApplied = len(rf.persistentState.LogEntries)
 	go rf.leaderCron()
 	go rf.nonLeaderCron()
 	return rf
@@ -523,6 +521,7 @@ loop:
 		if sleepTime > 0 {
 			time.Sleep(sleepTime)
 		}
+startRequestVote:
 		rf.mu.Lock()
 		timeSinceLastReceived = time.Since(rf.lastReceivedTime)
 		// if this server is leader or has received packets in electionTimeout, no need to go forward.
@@ -530,11 +529,9 @@ loop:
 			rf.mu.Unlock()
 			continue
 		}
-		rf.mu.Unlock()
-startRequestVote:
-		rf.mu.Lock()
 		Logf("%dms since last packet received, electionTimeout is %dms\n",
 			timeSinceLastReceived.Milliseconds(), electionTimeout.Milliseconds())
+		// reset timer
 		electionTimeout = electionTimeoutBase + time.Duration(rand.Intn(200))*time.Millisecond
 
 		rf.role = CANDIDATE
@@ -725,7 +722,10 @@ func (rf *Raft) syncWithFollower(server int) bool {
 			LeaderCommit: rf.commitIndex,
 		}
 		if appendArgs.PrevLogIndex != len(rf.persistentState.LogEntries){
-			appendArgs.Entries = rf.persistentState.LogEntries[rf.nextIndex[server]-1:]
+			// attention: DON'T assign the slice(rf.persistentState.LogEntries) directly to appendArgs.Entries
+			// because appendArgs in sendAppendEntries will read this slice,
+			// if AppendEntries is writing rf.persistentState.LogEntries, will cause data race
+			appendArgs.Entries = append([]LogEntry{}, rf.persistentState.LogEntries[rf.nextIndex[server]-1:]...)
 		}
 		if appendArgs.PrevLogIndex > 0 {
 			appendArgs.PrevLogTerm = rf.persistentState.LogEntries[appendArgs.PrevLogIndex-1].Term
