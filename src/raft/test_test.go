@@ -880,12 +880,14 @@ func internalChurn(t *testing.T, unreliable bool) {
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			cfg.disconnect(i)
+			Logf("disconnect server %d\n", i)
 		}
 
 		if (rand.Int() % 1000) < 500 {
 			i := rand.Int() % servers
 			if cfg.rafts[i] == nil {
 				cfg.start1(i)
+				Logf("start server %d\n", i)
 			}
 			cfg.connect(i)
 		}
@@ -894,6 +896,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 			i := rand.Int() % servers
 			if cfg.rafts[i] != nil {
 				cfg.crash1(i)
+				Logf("crash server %d\n", i)
 			}
 		}
 
@@ -904,6 +907,7 @@ func internalChurn(t *testing.T, unreliable bool) {
 		time.Sleep((RaftElectionTimeout * 7) / 10)
 	}
 
+	Logf("After 20 iteration loop.\n")
 	time.Sleep(RaftElectionTimeout)
 	cfg.setunreliable(false)
 	for i := 0; i < servers; i++ {
