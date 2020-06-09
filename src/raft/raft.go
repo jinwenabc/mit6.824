@@ -31,7 +31,7 @@ import "labrpc"
 // import "bytes"
 //import "labgob"
 
-var DebugMode = false
+var DebugMode = true
 
 func Logf(format string, args ...interface{}) {
 	if !DebugMode {
@@ -311,9 +311,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persistentState.VotedFor = -1
 	}
 	rf.persistentState.CurrentTerm = args.Term
-	if args.PrevLogIndex-1 >= 0{
-		if len(rf.persistentState.LogEntries) <= args.PrevLogIndex-1{
+	if args.PrevLogIndex >= 1{
+		if len(rf.persistentState.LogEntries) < args.PrevLogIndex{
 			success = false
+			reply.Index = len(rf.persistentState.LogEntries) + 1
 		}else if rf.persistentState.LogEntries[args.PrevLogIndex-1].Term != args.PrevLogTerm{
 			success = false
 			term := rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
@@ -380,9 +381,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 appendEntriesFinally:
 	reply.Term = rf.persistentState.CurrentTerm
 	reply.Success = success
-	if reply.Index == 0{
-		reply.Index = len(rf.persistentState.LogEntries) + 1
-	}
 	//if len(args.Entries)!=0{
 	//	fmt.Printf("reply from server %d:%v\n",rf.me, reply)
 	//}
