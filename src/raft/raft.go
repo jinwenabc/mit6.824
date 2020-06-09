@@ -64,11 +64,6 @@ const (
 	CANDIDATE
 )
 
-const (
-	HeartBeat = iota
-	SyncEntries
-)
-
 type LogEntry struct {
 	Term    int
 	Index   int
@@ -203,36 +198,37 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	Logf("server %d(term:%d) received request vote from server %d(term:%d)\n",
 		rf.me, rf.persistentState.CurrentTerm, args.CandidateId, args.Term)
+	granted := false
 	// If current term is less than args.term or hasn't voted for anyone except the one requests vote
 	if rf.persistentState.CurrentTerm < args.Term || (rf.persistentState.CurrentTerm == args.Term &&
 		(rf.persistentState.VotedFor == -1 || rf.persistentState.VotedFor == args.CandidateId)) {
 		rf.persistentState.CurrentTerm = args.Term
 		rf.role = FOLLOWER
-		approveCondition := false
 		if len(rf.persistentState.LogEntries) == 0 {
-			approveCondition = true
+			granted = true
 		} else {
 			logEntries := rf.persistentState.LogEntries
 			lastLogEntry := logEntries[len(logEntries)-1]
 
 			if lastLogEntry.Term < args.LastLogTerm {
-				approveCondition = true
+				granted = true
 			} else if lastLogEntry.Term > args.LastLogTerm {
-				approveCondition = false
+				granted = false
 			} else {
-				approveCondition = lastLogEntry.Index <= args.LastLogIndex
+				granted = lastLogEntry.Index <= args.LastLogIndex
 			}
 		}
-		if approveCondition {
-			//rf.persistentState.CurrentTerm = args.Term
-			rf.lastReceivedTime = time.Now()
-			rf.persistentState.VotedFor = args.CandidateId
-			reply.VoteGranted = true
-			goto voteFinally
-		}
 	}
-	reply.VoteGranted = false
-voteFinally:
+	if granted {
+		//rf.persistentState.CurrentTerm = args.Term
+		rf.lastReceivedTime = time.Now()
+		rf.persistentState.VotedFor = args.CandidateId
+		reply.VoteGranted = true
+	}else{
+		reply.VoteGranted = false
+	}
+
+	rf.persist()
 	reply.Term = rf.persistentState.CurrentTerm
 	Logf("in (server %d) vote server %d, result:%v\n", rf.me, args.CandidateId, reply)
 }
@@ -311,6 +307,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persistentState.VotedFor = -1
 	}
 	rf.persistentState.CurrentTerm = args.Term
+	rf.persist()
 	if args.PrevLogIndex >= 1{
 		if len(rf.persistentState.LogEntries) < args.PrevLogIndex{
 			success = false
@@ -320,7 +317,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			term := rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
 			minIndex := 1
 			maxIndex := args.PrevLogIndex
-			for minIndex+ 1 < maxIndex {
+			for minIndex + 1 < maxIndex {
 				midIndex := (minIndex + maxIndex) >> 1
 				if rf.persistentState.LogEntries[midIndex-1].Term == term{
 					maxIndex = midIndex
@@ -378,12 +375,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
+
 appendEntriesFinally:
 	reply.Term = rf.persistentState.CurrentTerm
 	reply.Success = success
-	//if len(args.Entries)!=0{
-	//	fmt.Printf("reply from server %d:%v\n",rf.me, reply)
-	//}
 	Logf("reply from server %d:%v\n",rf.me, reply)
 }
 
@@ -534,9 +529,9 @@ startRequestVote:
 
 		rf.role = CANDIDATE
 		rf.persistentState.CurrentTerm++
-		// increase CurrentTerm, reset VotedFor to -1 means hasn't vote for anyone in current term
-		rf.persistentState.VotedFor = -1
-
+		// increase CurrentTerm, set vote to self
+		rf.persistentState.VotedFor = rf.me
+		rf.persist()
 		voteArgs := &RequestVoteArgs{
 			Term:        rf.persistentState.CurrentTerm,
 			CandidateId: me,
@@ -601,6 +596,7 @@ startRequestVote:
 					disApprovedCount++
 					if voteResult.Term > rf.persistentState.CurrentTerm {
 						rf.persistentState.CurrentTerm = voteResult.Term
+						rf.persist()
 					}
 				}
 				if approvedCount > len(rf.peers)-approvedCount {
@@ -761,6 +757,7 @@ func (rf *Raft) syncWithFollower(server int) bool {
 		if reply.Term > rf.persistentState.CurrentTerm {
 			rf.persistentState.CurrentTerm = reply.Term
 			rf.role = FOLLOWER
+			rf.persist()
 			Logf("leader %d, turn to be follower(term:%d)\n", rf.me, rf.persistentState.CurrentTerm)
 			rf.mu.Unlock()
 			return false
