@@ -31,7 +31,7 @@ import "labrpc"
 // import "bytes"
 //import "labgob"
 
-var DebugMode = true
+var DebugMode = false
 
 func Logf(format string, args ...interface{}) {
 	if !DebugMode {
@@ -277,9 +277,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Index   int
-	Success bool
+	Term          int
+	ConflictTerm  int
+	ConflictIndex int
+	Success       bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -311,24 +312,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= 1{
 		if len(rf.persistentState.LogEntries) < args.PrevLogIndex{
 			success = false
-			reply.Index = len(rf.persistentState.LogEntries) + 1
+			reply.ConflictIndex = len(rf.persistentState.LogEntries) + 1
 		}else if rf.persistentState.LogEntries[args.PrevLogIndex-1].Term != args.PrevLogTerm{
 			success = false
-			term := rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
+			reply.ConflictTerm = rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
 			minIndex := 1
 			maxIndex := args.PrevLogIndex
 			for minIndex + 1 < maxIndex {
 				midIndex := (minIndex + maxIndex) >> 1
-				if rf.persistentState.LogEntries[midIndex-1].Term == term{
+				if rf.persistentState.LogEntries[midIndex-1].Term == reply.ConflictTerm{
 					maxIndex = midIndex
 				}else{
 					minIndex = maxIndex
 				}
 			}
-			if rf.persistentState.LogEntries[minIndex-1].Term == term{
-				reply.Index = minIndex
+			if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				reply.ConflictIndex = minIndex
 			}else{
-				reply.Index = maxIndex
+				reply.ConflictIndex = maxIndex
 			}
 		}
 	}
@@ -587,6 +588,10 @@ startRequestVote:
 			case voteResult := <- voteReplyCh:
 				Logf("in server %d election, drained from voteReplyCh, waiting for lock.\n", rf.me)
 				rf.mu.Lock()
+				if rf.role != CANDIDATE || voteArgs.Term != rf.persistentState.CurrentTerm{
+					rf.mu.Unlock()
+					goto drainOutVoteCh
+				}
 				Logf("in server %d election, drained from voteReplyCh, got lock.\n", rf.me)
 				if voteResult.VoteGranted {
 					approvedCount++
@@ -597,6 +602,9 @@ startRequestVote:
 					if voteResult.Term > rf.persistentState.CurrentTerm {
 						rf.persistentState.CurrentTerm = voteResult.Term
 						rf.persist()
+						rf.role = FOLLOWER
+						rf.lastReceivedTime = time.Now()
+						goto drainOutVoteCh
 					}
 				}
 				if approvedCount > len(rf.peers)-approvedCount {
@@ -670,15 +678,15 @@ func (rf *Raft) syncWithFollowers() {
 	successCount := 1
 	failCount := 0
 	start := time.Now()
-	for time.Since(start) < 50 * time.Millisecond{
+	for time.Since(start) < 30 * time.Millisecond{
+		rf.mu.Lock()
+		if rf.role != LEADER {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
 		select {
 		case reply := <- syncReplyCh:
-			rf.mu.Lock()
-			if rf.role != LEADER {
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
 			if !reply {
 				failCount++
 				continue
@@ -686,9 +694,9 @@ func (rf *Raft) syncWithFollowers() {
 			successCount++
 			if successCount > len(rf.peers)-successCount {
 				rf.updateLeaderCommitIndex()
-				break
+				goto drainOutSyncReplyCh
 			} else if failCount > len(rf.peers)-failCount {
-				break
+				goto drainOutSyncReplyCh
 			}
 		default:
 
@@ -696,6 +704,7 @@ func (rf *Raft) syncWithFollowers() {
 	}
 
 	// drain out syncReplyCh
+drainOutSyncReplyCh:
 	go func() {
 		for _ = range syncReplyCh {
 		}
@@ -704,9 +713,9 @@ func (rf *Raft) syncWithFollowers() {
 
 func (rf *Raft) syncWithFollower(server int) bool {
 	reply := &AppendEntriesReply{}
-	now := time.Now()
+	//now := time.Now()
 
-	for !reply.Success && time.Since(now) < 30*time.Millisecond {
+	for !reply.Success{
 		requestId := time.Now().UnixNano()
 		rf.mu.Lock()
 		appendArgs := &AppendEntriesArgs{
@@ -737,7 +746,7 @@ func (rf *Raft) syncWithFollower(server int) bool {
 		reply := &AppendEntriesReply{}
 		ok := rf.sendAppendEntries(server, appendArgs, reply)
 		if !ok{
-			continue
+			return false
 		}
 		Logf("SyncEntries reply of request(%v) from server %d: %v\n", requestId, server, reply)
 		rf.mu.Lock()
@@ -746,11 +755,15 @@ func (rf *Raft) syncWithFollower(server int) bool {
 			rf.mu.Unlock()
 			return false
 		}
+		if appendArgs.Term != rf.persistentState.CurrentTerm{
+			rf.mu.Unlock()
+			return false
+		}
 		if reply.Success {
 			rf.matchIndex[server] = appendArgs.PrevLogIndex + len(appendArgs.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			Logf("leader %d, change nextIndex of server%d, then nextIndex:%v, matchIndex:%v\n",
-				rf.me, server, rf.nextIndex, rf.matchIndex)
+			Logf("[requestID=%v]leader %d got success, change nextIndex of server %d, then nextIndex:%v, matchIndex:%v\n",
+				requestId, rf.me, server, rf.nextIndex, rf.matchIndex)
 			rf.mu.Unlock()
 			return true
 		}
@@ -758,17 +771,37 @@ func (rf *Raft) syncWithFollower(server int) bool {
 			rf.persistentState.CurrentTerm = reply.Term
 			rf.role = FOLLOWER
 			rf.persist()
-			Logf("leader %d, turn to be follower(term:%d)\n", rf.me, rf.persistentState.CurrentTerm)
+			Logf("[requestID=%v]leader %d, turn to be follower(term:%d)\n",
+				requestId, rf.me, rf.persistentState.CurrentTerm)
 			rf.mu.Unlock()
 			return false
 		}
-		//if rf.nextIndex[server] > 1 {
-		//	rf.nextIndex[server]--
-		//}
-		if reply.Index > 0{
-			rf.nextIndex[server] = reply.Index
+		targetIndex := 0
+		if reply.ConflictTerm != 0{
+			minIndex := 1
+			maxIndex := len(rf.persistentState.LogEntries)
+			for minIndex + 1 < maxIndex{
+				midIndex := (minIndex + maxIndex)>>1
+				if rf.persistentState.LogEntries[minIndex-1].Term <= reply.ConflictTerm{
+					minIndex = midIndex
+				}else{
+					maxIndex = midIndex
+				}
+			}
+			if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				targetIndex = maxIndex + 1
+			}else if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				targetIndex = minIndex + 1
+			}
 		}
-
+		if targetIndex == 0{
+			targetIndex = reply.ConflictIndex
+		}
+		if targetIndex > 0{
+			rf.nextIndex[server] = targetIndex
+			Logf("[requestID=%v]leader %d got false, change nextIndex of server %d, then nextIndex:%v\n",
+				requestId, rf.me, server, rf.nextIndex)
+		}
 		rf.mu.Unlock()
 	}
 	return false
@@ -777,7 +810,7 @@ func (rf *Raft) syncWithFollower(server int) bool {
 func (rf *Raft) updateLeaderCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if len(rf.persistentState.LogEntries) == 0 {
+	if rf.role != LEADER || len(rf.persistentState.LogEntries) == 0 {
 		return
 	}
 	committed := rf.commitIndex
