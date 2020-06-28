@@ -760,9 +760,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, 1, true)
 
 	nup := servers
-	for iters := 0; iters < 100; iters++ {
-		if iters == 50 {
-			Logf("iter:%d, setlongreordering\n")
+	for iters := 0; iters < 1000; iters++ {
+		if iters == 200 {
+			Logf("iter, setlongreordering\n")
 			cfg.setlongreordering(true)
 		}
 		leader := -1

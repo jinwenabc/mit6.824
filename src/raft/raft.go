@@ -64,11 +64,6 @@ const (
 	CANDIDATE
 )
 
-const (
-	HeartBeat = iota
-	SyncEntries
-)
-
 type LogEntry struct {
 	Term    int
 	Index   int
@@ -203,36 +198,37 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	Logf("server %d(term:%d) received request vote from server %d(term:%d)\n",
 		rf.me, rf.persistentState.CurrentTerm, args.CandidateId, args.Term)
+	granted := false
 	// If current term is less than args.term or hasn't voted for anyone except the one requests vote
 	if rf.persistentState.CurrentTerm < args.Term || (rf.persistentState.CurrentTerm == args.Term &&
 		(rf.persistentState.VotedFor == -1 || rf.persistentState.VotedFor == args.CandidateId)) {
 		rf.persistentState.CurrentTerm = args.Term
 		rf.role = FOLLOWER
-		approveCondition := false
 		if len(rf.persistentState.LogEntries) == 0 {
-			approveCondition = true
+			granted = true
 		} else {
 			logEntries := rf.persistentState.LogEntries
 			lastLogEntry := logEntries[len(logEntries)-1]
 
 			if lastLogEntry.Term < args.LastLogTerm {
-				approveCondition = true
+				granted = true
 			} else if lastLogEntry.Term > args.LastLogTerm {
-				approveCondition = false
+				granted = false
 			} else {
-				approveCondition = lastLogEntry.Index <= args.LastLogIndex
+				granted = lastLogEntry.Index <= args.LastLogIndex
 			}
 		}
-		if approveCondition {
-			//rf.persistentState.CurrentTerm = args.Term
-			rf.lastReceivedTime = time.Now()
-			rf.persistentState.VotedFor = args.CandidateId
-			reply.VoteGranted = true
-			goto voteFinally
-		}
 	}
-	reply.VoteGranted = false
-voteFinally:
+	if granted {
+		//rf.persistentState.CurrentTerm = args.Term
+		rf.lastReceivedTime = time.Now()
+		rf.persistentState.VotedFor = args.CandidateId
+		reply.VoteGranted = true
+	}else{
+		reply.VoteGranted = false
+	}
+
+	rf.persist()
 	reply.Term = rf.persistentState.CurrentTerm
 	Logf("in (server %d) vote server %d, result:%v\n", rf.me, args.CandidateId, reply)
 }
@@ -281,9 +277,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Index   int
-	Success bool
+	Term          int
+	ConflictTerm  int
+	ConflictIndex int
+	Success       bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -311,26 +308,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persistentState.VotedFor = -1
 	}
 	rf.persistentState.CurrentTerm = args.Term
-	if args.PrevLogIndex-1 >= 0{
-		if len(rf.persistentState.LogEntries) <= args.PrevLogIndex-1{
+	rf.persist()
+	if args.PrevLogIndex >= 1{
+		if len(rf.persistentState.LogEntries) < args.PrevLogIndex{
 			success = false
+			reply.ConflictIndex = len(rf.persistentState.LogEntries) + 1
 		}else if rf.persistentState.LogEntries[args.PrevLogIndex-1].Term != args.PrevLogTerm{
 			success = false
-			term := rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
+			reply.ConflictTerm = rf.persistentState.LogEntries[args.PrevLogIndex-1].Term
 			minIndex := 1
 			maxIndex := args.PrevLogIndex
-			for minIndex+ 1 < maxIndex {
+			for minIndex + 1 < maxIndex {
 				midIndex := (minIndex + maxIndex) >> 1
-				if rf.persistentState.LogEntries[midIndex-1].Term == term{
+				if rf.persistentState.LogEntries[midIndex-1].Term == reply.ConflictTerm{
 					maxIndex = midIndex
 				}else{
 					minIndex = maxIndex
 				}
 			}
-			if rf.persistentState.LogEntries[minIndex-1].Term == term{
-				reply.Index = minIndex
+			if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				reply.ConflictIndex = minIndex
 			}else{
-				reply.Index = maxIndex
+				reply.ConflictIndex = maxIndex
 			}
 		}
 	}
@@ -377,15 +376,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
+
 appendEntriesFinally:
 	reply.Term = rf.persistentState.CurrentTerm
 	reply.Success = success
-	if reply.Index == 0{
-		reply.Index = len(rf.persistentState.LogEntries) + 1
-	}
-	//if len(args.Entries)!=0{
-	//	fmt.Printf("reply from server %d:%v\n",rf.me, reply)
-	//}
 	Logf("reply from server %d:%v\n",rf.me, reply)
 }
 
@@ -536,9 +530,9 @@ startRequestVote:
 
 		rf.role = CANDIDATE
 		rf.persistentState.CurrentTerm++
-		// increase CurrentTerm, reset VotedFor to -1 means hasn't vote for anyone in current term
-		rf.persistentState.VotedFor = -1
-
+		// increase CurrentTerm, set vote to self
+		rf.persistentState.VotedFor = rf.me
+		rf.persist()
 		voteArgs := &RequestVoteArgs{
 			Term:        rf.persistentState.CurrentTerm,
 			CandidateId: me,
@@ -594,6 +588,10 @@ startRequestVote:
 			case voteResult := <- voteReplyCh:
 				Logf("in server %d election, drained from voteReplyCh, waiting for lock.\n", rf.me)
 				rf.mu.Lock()
+				if rf.role != CANDIDATE || voteArgs.Term != rf.persistentState.CurrentTerm{
+					rf.mu.Unlock()
+					goto drainOutVoteCh
+				}
 				Logf("in server %d election, drained from voteReplyCh, got lock.\n", rf.me)
 				if voteResult.VoteGranted {
 					approvedCount++
@@ -603,6 +601,10 @@ startRequestVote:
 					disApprovedCount++
 					if voteResult.Term > rf.persistentState.CurrentTerm {
 						rf.persistentState.CurrentTerm = voteResult.Term
+						rf.persist()
+						rf.role = FOLLOWER
+						rf.lastReceivedTime = time.Now()
+						goto drainOutVoteCh
 					}
 				}
 				if approvedCount > len(rf.peers)-approvedCount {
@@ -676,15 +678,15 @@ func (rf *Raft) syncWithFollowers() {
 	successCount := 1
 	failCount := 0
 	start := time.Now()
-	for time.Since(start) < 50 * time.Millisecond{
+	for time.Since(start) < 30 * time.Millisecond{
+		rf.mu.Lock()
+		if rf.role != LEADER {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
 		select {
 		case reply := <- syncReplyCh:
-			rf.mu.Lock()
-			if rf.role != LEADER {
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
 			if !reply {
 				failCount++
 				continue
@@ -692,9 +694,9 @@ func (rf *Raft) syncWithFollowers() {
 			successCount++
 			if successCount > len(rf.peers)-successCount {
 				rf.updateLeaderCommitIndex()
-				break
+				goto drainOutSyncReplyCh
 			} else if failCount > len(rf.peers)-failCount {
-				break
+				goto drainOutSyncReplyCh
 			}
 		default:
 
@@ -702,6 +704,7 @@ func (rf *Raft) syncWithFollowers() {
 	}
 
 	// drain out syncReplyCh
+drainOutSyncReplyCh:
 	go func() {
 		for _ = range syncReplyCh {
 		}
@@ -710,9 +713,9 @@ func (rf *Raft) syncWithFollowers() {
 
 func (rf *Raft) syncWithFollower(server int) bool {
 	reply := &AppendEntriesReply{}
-	now := time.Now()
+	//now := time.Now()
 
-	for !reply.Success && time.Since(now) < 30*time.Millisecond {
+	for !reply.Success{
 		requestId := time.Now().UnixNano()
 		rf.mu.Lock()
 		appendArgs := &AppendEntriesArgs{
@@ -743,7 +746,7 @@ func (rf *Raft) syncWithFollower(server int) bool {
 		reply := &AppendEntriesReply{}
 		ok := rf.sendAppendEntries(server, appendArgs, reply)
 		if !ok{
-			continue
+			return false
 		}
 		Logf("SyncEntries reply of request(%v) from server %d: %v\n", requestId, server, reply)
 		rf.mu.Lock()
@@ -752,28 +755,53 @@ func (rf *Raft) syncWithFollower(server int) bool {
 			rf.mu.Unlock()
 			return false
 		}
+		if appendArgs.Term != rf.persistentState.CurrentTerm{
+			rf.mu.Unlock()
+			return false
+		}
 		if reply.Success {
 			rf.matchIndex[server] = appendArgs.PrevLogIndex + len(appendArgs.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			Logf("leader %d, change nextIndex of server%d, then nextIndex:%v, matchIndex:%v\n",
-				rf.me, server, rf.nextIndex, rf.matchIndex)
+			Logf("[requestID=%v]leader %d got success, change nextIndex of server %d, then nextIndex:%v, matchIndex:%v\n",
+				requestId, rf.me, server, rf.nextIndex, rf.matchIndex)
 			rf.mu.Unlock()
 			return true
 		}
 		if reply.Term > rf.persistentState.CurrentTerm {
 			rf.persistentState.CurrentTerm = reply.Term
 			rf.role = FOLLOWER
-			Logf("leader %d, turn to be follower(term:%d)\n", rf.me, rf.persistentState.CurrentTerm)
+			rf.persist()
+			Logf("[requestID=%v]leader %d, turn to be follower(term:%d)\n",
+				requestId, rf.me, rf.persistentState.CurrentTerm)
 			rf.mu.Unlock()
 			return false
 		}
-		//if rf.nextIndex[server] > 1 {
-		//	rf.nextIndex[server]--
-		//}
-		if reply.Index > 0{
-			rf.nextIndex[server] = reply.Index
+		targetIndex := 0
+		if reply.ConflictTerm != 0{
+			minIndex := 1
+			maxIndex := len(rf.persistentState.LogEntries)
+			for minIndex + 1 < maxIndex{
+				midIndex := (minIndex + maxIndex)>>1
+				if rf.persistentState.LogEntries[minIndex-1].Term <= reply.ConflictTerm{
+					minIndex = midIndex
+				}else{
+					maxIndex = midIndex
+				}
+			}
+			if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				targetIndex = maxIndex + 1
+			}else if rf.persistentState.LogEntries[minIndex-1].Term == reply.ConflictTerm{
+				targetIndex = minIndex + 1
+			}
 		}
-
+		if targetIndex == 0{
+			targetIndex = reply.ConflictIndex
+		}
+		if targetIndex > 0{
+			rf.nextIndex[server] = targetIndex
+			Logf("[requestID=%v]leader %d got false, change nextIndex of server %d, then nextIndex:%v\n",
+				requestId, rf.me, server, rf.nextIndex)
+		}
 		rf.mu.Unlock()
 	}
 	return false
@@ -782,7 +810,7 @@ func (rf *Raft) syncWithFollower(server int) bool {
 func (rf *Raft) updateLeaderCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if len(rf.persistentState.LogEntries) == 0 {
+	if rf.role != LEADER || len(rf.persistentState.LogEntries) == 0 {
 		return
 	}
 	committed := rf.commitIndex
